@@ -15,14 +15,52 @@ storage = DatasetStorage()
 @app.get("/health", response_model=HealthResponse)
 def health_check():
     """Return the application status and version."""
-    pass
+    return {"status": "ok", "version": app.version}
 
 @app.post("/upload", response_model=DatasetInfo)
 async def upload_dataset(file: UploadFile = File(...)):
     """Read and store a CSV upload."""
-    pass
+    extension = Path(file.filename or "").suffix.lower()
+    if extension != ".csv":
+        logger.warning("Unsupported file format: %s", extension)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: '{extension}'. Only .csv files are accepted.",
+        )
+    contents = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(contents))
+    except pd.errors.EmptyDataError:
+        logger.warning("Empty CSV upload: %s", file.filename)
+        raise HTTPException(status_code=400, detail="The uploaded CSV file is empty.")
+    except pd.errors.ParserError:
+        logger.warning("Could not parse CSV upload: %s", file.filename)
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file could not be parsed as CSV. Check its formatting.",
+        )
+    except UnicodeDecodeError:
+        logger.warning("Could not decode CSV upload: %s", file.filename)
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is not valid UTF-8 text. Save it as a UTF-8 CSV.",
+        )
+ 
+    dataset_id = storage.save(df, file.filename)
+    logger.info(
+        "Uploaded dataset: id=%d, filename=%s, rows=%d",
+        dataset_id, file.filename, len(df),
+    )
+    return storage.get_metadata(dataset_id)
 
 @app.get("/datasets/{dataset_id}")
 def get_dataset(dataset_id: int, limit: int = Query(default=100, ge=1)):
     """Return up to limit rows from a stored dataset."""
-    pass
+    df = storage.get(dataset_id)
+    if df is None:
+        logger.warning("Dataset not found: %s", dataset_id)
+        raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found.")
+ 
+    records = json.loads(df.head(limit).to_json(orient="records"))
+    logger.info("Retrieved dataset: id=%d, returned_rows=%d", dataset_id, len(records))
+    return {"id": dataset_id, "data": records, "total_rows": len(df)}
